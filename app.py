@@ -20,9 +20,9 @@ IMG_SIZE = (256, 256)
 MODEL_PATH = 'best_model.pth' 
 MIN_SPILL_AREA_PIXELS = 500
 
-# ===================================================================
-#  1. Define the U-Net Model Architecture (must match your trained model)
-# ===================================================================
+
+#  1. Define the U-Net Model Architecture 
+
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
@@ -69,19 +69,17 @@ class UNET(nn.Module):
             x = self.ups[idx+1](concat_skip)
         return self.final_conv(x)
 
-# ===================================================================
 #  2. Define the Preprocessing Transform
-# ===================================================================
-# This must be the same 'base_transform' used during training/validation
+
 base_transform = A.Compose([
     A.Resize(height=IMG_SIZE[0], width=IMG_SIZE[1]),
     A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0], max_pixel_value=255.0),
     ToTensorV2(),
 ])
 
-# ===================================================================
+
 #  3. Load the Model
-# ===================================================================
+
 @st.cache_resource
 def load_pytorch_model():
     """Loads the PyTorch U-Net model and its weights."""
@@ -96,14 +94,14 @@ def load_pytorch_model():
         st.error(f"Please make sure the model file '{MODEL_PATH}' is in the same directory.")
         return None, None
 
-# ===================================================================
+
 #  4. The Prediction Function
-# ===================================================================
+
 def predict_and_analyze(model, device, image_bytes):
-    """Preprocesses image, runs PyTorch model prediction, and analyzes the result."""
+    """Preprocesses image, runs PyTorch model prediction, analyzes, and creates an overlay."""
     # 1. Preprocess
     pil_image = Image.open(image_bytes).convert('RGB')
-    image_np = np.array(pil_image)
+    image_np = np.array(pil_image) # Original image as NumPy array
     
     transformed = base_transform(image=image_np)
     input_tensor = transformed['image'].unsqueeze(0).to(device)
@@ -114,21 +112,52 @@ def predict_and_analyze(model, device, image_bytes):
         probs = torch.sigmoid(logits)
         predicted_mask_tensor = (probs > 0.5).float()
 
-    # 3. Analyze the mask
+    # 3. Analyze the mask and apply minimum area threshold
     spill_pixel_count = torch.sum(predicted_mask_tensor).item()
     if spill_pixel_count > MIN_SPILL_AREA_PIXELS:
         status = f"Oil Spill Detected ({int(spill_pixel_count)} spill pixels found)"
         status_color = "red"
+        # Ensure mask is not cleared if spill is detected
+        final_binary_mask_np = predicted_mask_tensor.squeeze().cpu().numpy()
     else:
         status = "No Spill Detected"
         status_color = "green"
-        predicted_mask_tensor = torch.zeros_like(predicted_mask_tensor)
+        # Clear the mask if no significant spill
+        final_binary_mask_np = np.zeros_like(predicted_mask_tensor.squeeze().cpu().numpy())
 
-    # 4. Convert to visible format
-    inverted_mask_tensor = 1 - predicted_mask_tensor
-    visible_mask = inverted_mask_tensor.squeeze().cpu().numpy() * 255
+    # --- NEW STEP: Create the Overlay Image ---
+    # Resize the original image to match the model's input/output size for overlay
+    resized_original_image_for_overlay = cv2.resize(image_np, IMG_SIZE, interpolation=cv2.INTER_AREA)
+
+    # Define the color for the oil spill (e.g., Red in BGR, then convert to RGB for matplotlib/PIL)
+    # OpenCV uses BGR by default, so we'll define it as BGR and convert later if needed.
+    OIL_SPILL_COLOR_BGR = (0, 0, 255) # Bright Red (B=0, G=0, R=255)
+    ALPHA = 0.5 # Transparency factor (0.0 = fully transparent, 1.0 = fully opaque)
+
+    # Create a colored overlay from the binary mask
+    # We want a 3-channel image for color blending
+    colored_spill_mask = np.zeros_like(resized_original_image_for_overlay, dtype=np.uint8)
     
-    return pil_image.resize(IMG_SIZE), visible_mask.astype(np.uint8), status, status_color
+    # Apply the color only where the mask is 1 (oil spill)
+    # Note: final_binary_mask_np is (H, W), so we use a boolean mask to apply color
+    colored_spill_mask[final_binary_mask_np == 1] = OIL_SPILL_COLOR_BGR # BGR here
+
+    # Convert the resized original image to BGR for consistent blending with OpenCV
+    resized_original_image_bgr = cv2.cvtColor(resized_original_image_for_overlay, cv2.COLOR_RGB2BGR)
+
+    # Blend the original image with the colored spill mask
+    # cv2.addWeighted works with BGR images
+    overlay_image_bgr = cv2.addWeighted(resized_original_image_bgr, 1 - ALPHA, colored_spill_mask, ALPHA, 0)
+    
+    # Convert the final overlay image back to RGB for Streamlit/PIL display
+    overlay_image_rgb = cv2.cvtColor(overlay_image_bgr, cv2.COLOR_BGR2RGB)
+    
+    # The original image that Streamlit displays should also be resized to match
+    original_image_for_display = pil_image.resize(IMG_SIZE)
+
+    return original_image_for_display, overlay_image_rgb, status, status_color
+
+
 
 # --- Streamlit UI ---
 st.title("🌊 Oil Spill Detection System (PyTorch)")
@@ -148,7 +177,7 @@ if model:
         with col1:
             st.image(original_image, caption='Original Uploaded Image', use_container_width=True)
         with col2:
-            st.image(predicted_mask, caption='Predicted Segmentation Mask', use_container_width=True, channels='GRAY')
+            st.image(predicted_mask, caption='Oil Spill Overlay', use_container_width=True)
 
         st.success("Analysis complete!")
 else:
