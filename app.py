@@ -275,9 +275,9 @@ if model:
             if 'analysis_complete' in st.session_state:
                 oil_pct = float(st.session_state.result_stats.split("Oil Coverage")[1].split("%")[0].split()[-1])
                 if oil_pct > 1:
-                    st.error(f"🚨 **OIL SPILL DETECTED** ({oil_pct:.1f}% coverage)")
+                    st.error("🚨 **OIL SPILL DETECTED** ")
                 else:
-                    st.success(f"✅ **NO SPILL DETECTED** ({oil_pct:.1f}% coverage)")
+                    st.success("✅ **NO SPILL DETECTED** ")
 
                 st.image(st.session_state.result_plot, caption="Analysis Results", width=500)
                 st.markdown("**Statistics:**")
