@@ -10,25 +10,25 @@ from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-# Fix matplotlib cache directory issue
+# Set matplotlib cache directory to avoid import issues
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib_cache')
 
 import matplotlib.pyplot as plt
 
-# --- App Configuration ---
+# App configuration
 st.set_page_config(
     page_title="U-Net Oil Spill Detection",
     page_icon="🌊",
     layout="wide"
 )
 
-# --- Global Settings ---
+# Model settings
 DEVICE = torch.device("cpu")
-MODEL_PATH = 'best_model.pth' # From Code 2
-IMG_SIZE = (256, 256)      # Model's expected input size from Code 2
-DEFAULT_THRESHOLD = 0.5    # Standard starting threshold for sigmoid
+MODEL_PATH = 'best_model.pth'
+IMG_SIZE = (256, 256)
+DEFAULT_THRESHOLD = 0.5
 
-# --- 1. U-Net Model Architecture (from Code 2) ---
+# U-Net building block with two conv layers
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
@@ -43,29 +43,40 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
+# Main U-Net model with encoder-decoder architecture
 class UNET(nn.Module):
     def __init__(self, in_channels=3, out_channels=1, features=[64, 128, 256, 512]):
         super(UNET, self).__init__()
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Encoder: downsampling path
         for feature in features:
             self.downs.append(DoubleConv(in_channels, feature))
             in_channels = feature
+
+        # Decoder: upsampling path
         for feature in reversed(features):
             self.ups.append(nn.ConvTranspose2d(feature*2, feature, kernel_size=2, stride=2))
             self.ups.append(DoubleConv(feature*2, feature))
+
         self.bottleneck = DoubleConv(features[-1], features[-1]*2)
         self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
 
     def forward(self, x):
         skip_connections = []
+
+        # Encoder path with skip connections
         for down in self.downs:
             x = down(x)
             skip_connections.append(x)
             x = self.pool(x)
+
         x = self.bottleneck(x)
         skip_connections = skip_connections[::-1]
+
+        # Decoder path
         for idx in range(0, len(self.ups), 2):
             x = self.ups[idx](x)
             skip_connection = skip_connections[idx//2]
@@ -73,25 +84,21 @@ class UNET(nn.Module):
                 x = TF.resize(x, size=skip_connection.shape[2:])
             concat_skip = torch.cat((skip_connection, x), dim=1)
             x = self.ups[idx+1](concat_skip)
+
         return self.final_conv(x)
 
-# --- 2. Preprocessing Transform (from Code 2) ---
+# Image preprocessing for the model
 base_transform = A.Compose([
     A.Resize(height=IMG_SIZE[0], width=IMG_SIZE[1]),
     A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0], max_pixel_value=255.0),
     ToTensorV2(),
 ])
 
-# --- 3. Model Loader (for U-Net from Code 2) ---
+# Load the trained U-Net model
 @st.cache_resource
 def load_unet_model():
-    """
-    Loads the custom PyTorch U-Net model and its weights.
-    Cached by Streamlit to load only once.
-    """
     try:
         model = UNET(in_channels=3, out_channels=1).to(DEVICE)
-        # Check if model file exists before loading
         if not os.path.exists(MODEL_PATH):
             st.error(f"Model file not found at '{MODEL_PATH}'. Please place the model in the correct directory.")
             return None
@@ -103,78 +110,76 @@ def load_unet_model():
         st.error(f"Error loading PyTorch model: {e}")
         return None
 
-# --- 4. Inference, Visualization, and Analysis (Style from Code 1) ---
+# Run inference and create visualization
 @torch.no_grad()
 def predict_and_visualize(model, image, threshold):
-    """
-    Runs inference using the U-Net model and generates the styled 4-panel plot and stats.
-    """
     try:
-        # Preserve original for sizing and final display
+        # Convert image and get dimensions
         original = np.array(image.convert("RGB"))
         oh, ow = original.shape[:2]
 
-        # Preprocess using the U-Net's specific transform
+        # Preprocess and run model
         transformed = base_transform(image=original)
         x = transformed['image'].unsqueeze(0).to(DEVICE)
-
-        # Get model prediction
         logits = model(x)
-        prob = torch.sigmoid(logits)[0, 0].cpu().numpy() # (256, 256)
+        prob = torch.sigmoid(logits)[0, 0].cpu().numpy()
 
-        # IMPORTANT: Resize probability map back to original image size for accurate overlay
+        # Resize prediction to match original image size
         prob_resized = cv2.resize(prob, (ow, oh), interpolation=cv2.INTER_LINEAR)
         mask = (prob_resized >= float(threshold)).astype(np.uint8)
 
-        # Create overlay (style from Code 1)
-        orig_gray_for_display = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
-        overlay_rgb = cv2.cvtColor(orig_gray_for_display, cv2.COLOR_GRAY2RGB)
-        overlay_colored = overlay_rgb.copy()
-        overlay_colored[mask == 1] = [255, 0, 0] # Red for spill
-        blended = cv2.addWeighted(overlay_rgb, 0.7, overlay_colored, 0.3, 0)
+        # Create visualization overlay
+        gray_image = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
+        overlay = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2RGB)
+        overlay[mask == 1] = [255, 0, 0]  # Red overlay for detected spills
+        blended = cv2.addWeighted(overlay, 0.7, cv2.cvtColor(gray_image, cv2.COLOR_GRAY2RGB), 0.3, 0)
 
-        # Calculate statistics (style from Code 1)
+        # Calculate spill statistics
         total_px = mask.size
         oil_px = int(mask.sum())
         oil_pct = 100.0 * oil_px / max(total_px, 1)
         conf_max = float(prob_resized.max())
         conf_mean_spill = float(prob_resized[mask == 1].mean()) if oil_px > 0 else 0.0
 
-        # --- Generate 4-Panel Plot (style from Code 1) ---
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10), facecolor='#0E1117')
-        fig.suptitle("U-Net Spill Analysis Results", fontsize=18, fontweight="bold", color='white')
+        # Create 4-panel visualization
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle("Oil Spill Analysis Results", fontsize=16, fontweight="bold")
 
-        axes[0, 0].imshow(orig_gray_for_display, cmap="gray")
-        axes[0, 0].set_title(f"Input Image ({ow}×{oh})", color='white')
+        # Input image
+        axes[0, 0].imshow(gray_image, cmap="gray")
+        axes[0, 0].set_title(f"Input Image ({ow}×{oh})")
         axes[0, 0].axis("off")
 
+        # Probability heatmap
         im1 = axes[0, 1].imshow(prob_resized, cmap="hot", vmin=0, vmax=1)
-        axes[0, 1].set_title("Oil Spill Probability", color='white')
+        axes[0, 1].set_title("Spill Probability")
         axes[0, 1].axis("off")
-        cbar = plt.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
-        cbar.ax.yaxis.set_tick_params(color='white')
-        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+        plt.colorbar(im1, ax=axes[0, 1])
 
+        # Detection mask
         axes[1, 0].imshow(mask, cmap="Reds", vmin=0, vmax=1)
-        axes[1, 0].set_title(f"Detection (Threshold: {float(threshold):.2f})", color='white')
+        axes[1, 0].set_title(f"Detection (Threshold: {threshold:.2f})")
         axes[1, 0].axis("off")
 
+        # Overlay visualization
         axes[1, 1].imshow(blended)
-        axes[1, 1].set_title("Oil Spill Overlay", color='white')
+        axes[1, 1].set_title("Spill Overlay")
         axes[1, 1].axis("off")
 
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.tight_layout()
 
+        # Save plot to memory
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
         buf.seek(0)
         plt.close(fig)
         result_image = Image.open(buf)
 
-        # --- Generate Statistics Markdown (style from Code 1) ---
+        # Generate statistics summary
         severity = 'HIGH' if oil_pct > 10 else 'MODERATE' if oil_pct > 5 else 'LOW' if oil_pct > 1 else 'MINIMAL'
         status_icon = '🚨' if oil_pct > 1 else '✅'
         status_text = 'OIL SPILL DETECTED' if oil_pct > 1 else 'No significant oil detected'
+
         results_text = f"""
         | Metric | Value |
         | :--- | :--- |
@@ -184,128 +189,103 @@ def predict_and_visualize(model, image, threshold):
         | **Oil Pixels** | {oil_px:,} / {total_px:,} |
         | **Max Confidence** | {conf_max:.3f} |
         | **Mean Spill Confidence** | {conf_mean_spill:.3f} |
-        | **Threshold Used** | {float(threshold):.2f} |
+        | **Threshold Used** | {threshold:.2f} |
         | **Image Size** | {ow} × {oh} pixels |
         """
+
         return result_image, results_text
 
     except Exception as e:
         st.error(f"❌ Error during analysis: {e}")
         return None, None
 
-# --- 5. Streamlit UI - Instructions First Layout ---
+# Main application interface
 st.title("🌊 Oil Spill Detection System")
 st.markdown("AI-powered oil spill detection from satellite imagery.")
 
-# Load Model
 model = load_unet_model()
 
 if model:
-    # Create two columns: Left = Instructions + Browse, Right = Results
+    # Two-column layout
     left_col, right_col = st.columns([1, 1])
 
-    # LEFT COLUMN: Browse first, then Instructions
+    # Left column: file upload and controls
     with left_col:
-        # Browse/Upload in first place
-        st.markdown("### 📤 Browse Files")
+        st.markdown("### 📤 Upload Image")
         uploaded_file = st.file_uploader(
-            "Choose a satellite image file",
-            type=["jpg", "png", "jpeg"],
-            help="Select a satellite or aerial image for oil spill analysis"
+            "Choose a satellite image",
+            type=["jpg", "png", "jpeg"]
         )
 
         if uploaded_file is not None:
             input_image = Image.open(uploaded_file)
 
-            # Clear previous analysis when new file is uploaded
+            # Clear old results when new file is selected
             if 'previous_file' not in st.session_state or st.session_state.previous_file != uploaded_file.name:
                 st.session_state.previous_file = uploaded_file.name
-                # Clear previous analysis results
-                if 'analysis_complete' in st.session_state:
-                    del st.session_state.analysis_complete
-                if 'result_plot' in st.session_state:
-                    del st.session_state.result_plot
-                if 'result_stats' in st.session_state:
-                    del st.session_state.result_stats
-                if 'input_image' in st.session_state:
-                    del st.session_state.input_image
+                # Clear previous analysis
+                keys_to_delete = ['analysis_complete', 'result_plot', 'result_stats', 'input_image']
+                for key in keys_to_delete:
+                    if key in st.session_state:
+                        del st.session_state[key]
                 st.rerun()
 
-            st.markdown("**Detection Settings:**")
             threshold = st.slider(
-                "Sensitivity Level",
+                "Detection Sensitivity",
                 min_value=0.1, max_value=0.9,
-                value=DEFAULT_THRESHOLD, step=0.05,
-                help="Adjust how sensitive the detection should be"
+                value=DEFAULT_THRESHOLD, step=0.05
             )
 
             if st.button("🔍 Detect Oil Spills", type="primary"):
-                with st.spinner('🤖 Analyzing image with AI model...'):
+                with st.spinner('Analyzing image...'):
                     result_plot, result_stats = predict_and_visualize(model, input_image, threshold)
 
                 if result_plot and result_stats:
-                    # Store results for right column display
+                    # Store results in session state
                     st.session_state.analysis_complete = True
                     st.session_state.result_plot = result_plot
                     st.session_state.result_stats = result_stats
                     st.session_state.input_image = input_image
                     st.rerun()
-                else:
-                    st.error("❌ Could not analyze the image. Please try another file.")
 
         st.markdown("---")
-
-        # Instructions in second place
-        st.markdown("### 📋 Instructions")
+        st.markdown("### 📋 How to Use")
         st.markdown("""
-        **How to detect oil spills:**
-
-        1. **Browse** and select a satellite image file
-        2. **Adjust** the detection sensitivity if needed
-        3. **Click** 'Detect Oil Spills' to analyze
-        4. **View results** in the right panel
+        **Steps:**
+        1. Upload a satellite image
+        2. Adjust sensitivity if needed
+        3. Click 'Detect Oil Spills'
 
         **Sensitivity Guide:**
-        - 🔴 **Low (0.1-0.3)**: High sensitivity, may detect small spills
-        - 🟡 **Medium (0.4-0.6)**: Balanced detection
-        - 🟢 **High (0.7-0.9)**: Low sensitivity, fewer false positives
-
-        **Tips:**
-        - Use higher sensitivity for suspicious areas
-        - Lower sensitivity reduces false alarms
-        - Analysis takes a few seconds
+        - 🔴 **Low (0.1-0.3)**: High sensitivity
+        - 🟡 **Medium (0.4-0.6)**: Balanced
+        - 🟢 **High (0.7-0.9)**: Low sensitivity
         """)
 
-    # RIGHT COLUMN: Results Display
+    # Right column: results and image preview
     with right_col:
-        st.markdown("### 📊 Analysis Results")
+        st.markdown("### 📊 Results")
 
         if uploaded_file is not None:
-            # Always show current input image immediately
+            # Show current image immediately
             input_image = Image.open(uploaded_file)
-            st.markdown("**Input Image:**")
-            st.image(input_image, width=350, caption="Current image ready for analysis")
+            st.image(input_image, width=350, caption="Current image")
 
             # Show analysis results if available
             if 'analysis_complete' in st.session_state:
-                # Show detection result with color coding
                 oil_pct = float(st.session_state.result_stats.split("Oil Coverage")[1].split("%")[0].split()[-1])
                 if oil_pct > 1:
-                    st.error(f"🚨 **OIL SPILL DETECTED** ({oil_pct:.1f}% of image)")
+                    st.error(f"🚨 **OIL SPILL DETECTED** ({oil_pct:.1f}% coverage)")
                 else:
-                    st.success(f"✅ **NO SPILL DETECTED** ({oil_pct:.1f}% of image)")
+                    st.success(f"✅ **NO SPILL DETECTED** ({oil_pct:.1f}% coverage)")
 
-                # Show analysis visualization
-                st.image(st.session_state.result_plot, caption="AI Analysis Results", width=500)
-
-                # Show detailed statistics
-                st.markdown("**Detailed Statistics:**")
+                st.image(st.session_state.result_plot, caption="Analysis Results", width=500)
+                st.markdown("**Statistics:**")
                 st.markdown(st.session_state.result_stats)
             else:
-                st.info("👈 Click 'Detect Oil Spills' in the left panel to analyze this image.")
-
+                st.info("👈 Click 'Detect Oil Spills' to analyze this image.")
         else:
-            st.info("📤 Upload an image in the left panel and run analysis to see results here.")
+            st.info("Upload an image to see results here.")
 
 else:
-    st.error("❌ AI model could not be loaded. Please ensure 'best_model.pth' exists.")
+    st.error("❌ Model not loaded. Check that 'best_model.pth' exists.")
