@@ -217,6 +217,20 @@ if model:
         if uploaded_file is not None:
             input_image = Image.open(uploaded_file)
 
+            # Clear previous analysis when new file is uploaded
+            if 'previous_file' not in st.session_state or st.session_state.previous_file != uploaded_file.name:
+                st.session_state.previous_file = uploaded_file.name
+                # Clear previous analysis results
+                if 'analysis_complete' in st.session_state:
+                    del st.session_state.analysis_complete
+                if 'result_plot' in st.session_state:
+                    del st.session_state.result_plot
+                if 'result_stats' in st.session_state:
+                    del st.session_state.result_stats
+                if 'input_image' in st.session_state:
+                    del st.session_state.input_image
+                st.rerun()
+
             st.markdown("**Detection Settings:**")
             threshold = st.slider(
                 "Sensitivity Level",
@@ -266,30 +280,29 @@ if model:
     with right_col:
         st.markdown("### 📊 Analysis Results")
 
-        if uploaded_file is not None and 'analysis_complete' in st.session_state:
-            # Show input image
-            st.markdown("**Input Image:**")
-            st.image(st.session_state.input_image, width=350)
-
-            # Show detection result
-            oil_pct = float(st.session_state.result_stats.split("Oil Coverage")[1].split("%")[0].split()[-1])
-            if oil_pct > 1:
-                st.success(f"🚨 **OIL SPILL DETECTED** ({oil_pct:.1f}% of image)")
-            else:
-                st.success(f"✅ **NO SPILL DETECTED** ({oil_pct:.1f}% of image)")
-
-            # Show analysis visualization
-            st.image(st.session_state.result_plot, caption="AI Analysis Results", width=500)
-
-            # Show detailed statistics
-            st.markdown("**Detailed Statistics:**")
-            st.markdown(st.session_state.result_stats)
-
-        elif uploaded_file is not None:
-            st.markdown("**Input Image Preview:**")
+        if uploaded_file is not None:
+            # Always show current input image immediately
             input_image = Image.open(uploaded_file)
-            st.image(input_image, width=350, caption="Image loaded - Click 'Detect Oil Spills' to analyze")
-            st.info("👈 Use the controls in the left panel to analyze this image.")
+            st.markdown("**Input Image:**")
+            st.image(input_image, width=350, caption="Current image ready for analysis")
+
+            # Show analysis results if available
+            if 'analysis_complete' in st.session_state:
+                # Show detection result with color coding
+                oil_pct = float(st.session_state.result_stats.split("Oil Coverage")[1].split("%")[0].split()[-1])
+                if oil_pct > 1:
+                    st.error(f"🚨 **OIL SPILL DETECTED** ({oil_pct:.1f}% of image)")
+                else:
+                    st.success(f"✅ **NO SPILL DETECTED** ({oil_pct:.1f}% of image)")
+
+                # Show analysis visualization
+                st.image(st.session_state.result_plot, caption="AI Analysis Results", width=500)
+
+                # Show detailed statistics
+                st.markdown("**Detailed Statistics:**")
+                st.markdown(st.session_state.result_stats)
+            else:
+                st.info("👈 Click 'Detect Oil Spills' in the left panel to analyze this image.")
 
         else:
             st.info("📤 Upload an image in the left panel and run analysis to see results here.")
