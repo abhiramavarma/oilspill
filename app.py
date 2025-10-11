@@ -231,7 +231,7 @@ if model:
                 st.rerun()
 
             input_image = Image.open(uploaded_file)
-            st.image(input_image, width=450, caption="Current image")
+            st.image(input_image,use_container_width=True, caption="Current image")
 
 
             threshold = st.slider(
