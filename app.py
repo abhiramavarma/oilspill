@@ -13,9 +13,6 @@ from albumentations.pytorch import ToTensorV2
 # Set matplotlib cache directory to avoid import issues
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib_cache')
 
-
-
-
 import matplotlib.pyplot as plt
 
 # App configuration
@@ -233,11 +230,17 @@ if model:
                         del st.session_state[key]
                 st.rerun()
 
+            input_image = Image.open(uploaded_file)
+            st.image(input_image, width=450, caption="Current image")
+
+
             threshold = st.slider(
                 "Detection Sensitivity",
                 min_value=0.1, max_value=0.9,
                 value=DEFAULT_THRESHOLD, step=0.05
             )
+
+            
 
             if st.button("🔍 Detect Oil Spills", type="primary"):
                 with st.spinner('Analyzing image...'):
@@ -271,18 +274,16 @@ if model:
 
         if uploaded_file is not None:
             # Show current image immediately
-            input_image = Image.open(uploaded_file)
-            st.image(input_image, width=350, caption="Current image")
-
+            
             # Show analysis results if available
             if 'analysis_complete' in st.session_state:
                 oil_pct = float(st.session_state.result_stats.split("Oil Coverage")[1].split("%")[0].split()[-1])
                 if oil_pct > 1:
-                    st.error("🚨 **OIL SPILL DETECTED** ")
+                    st.error("🚨 **OIL SPILL DETECTED**")
                 else:
                     st.success("✅ **NO SPILL DETECTED** ")
 
-                st.image(st.session_state.result_plot, caption="Analysis Results", width=500)
+                st.image(st.session_state.result_plot, caption="Analysis Results", use_container_width=True)
                 st.markdown("**Statistics:**")
                 st.markdown(st.session_state.result_stats)
             else:
